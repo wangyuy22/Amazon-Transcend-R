@@ -1,0 +1,185 @@
+---
+title: "Transcend Analysis - Yuyang Wang"
+output: html_notebook
+---
+
+```{r}
+#packages
+install.packages("tidyverse")
+install.packages("syuzhet")
+install.packages("tm")
+install.packages("wordcloud")
+```
+
+```{r}
+#libraries
+library(tidyverse)
+library(stringr)
+library(magrittr)
+library(dplyr)
+library(syuzhet)
+library(tm)
+library(wordcloud)
+```
+
+
+```{r}
+#read in file
+electronics = read_csv("/Users/yuyangwang 1/Desktop/Penn/Course Work/19-Fall/OIDD 245/Transcend/electronics_downsample.csv")
+```
+
+Part 1: Identify competitors in the Amazon SD marketplace
+
+The top 3 ASINs are B007WTAJTO, B002WE6D44, B000VX6XL6.
+
+```{r}
+#filtering for SD or sd
+all_sd = electronics %>%
+  filter(str_detect(reviewText, " sd | SD "))
+
+#group by asin
+grouped_sd = all_sd %>%
+  group_by(asin) %>%
+  tally %>%
+  arrange(desc(n))
+
+#top 3
+top3_asin = head(grouped_sd, 3)
+colnames(top3_asin) = c("ASIN", "Count")
+top3_asin
+```
+
+Part 2:
+
+The average overall number of stars and average sentiment scores for the top 3 ASINs are shown below.
+
+```{r}
+#getting info for top 3 asins
+all_info_top3 = electronics %>%
+ filter(asin %in% top3_asin$ASIN)
+
+#getting average of overall stars
+avg_star = all_info_top3 %>%
+  group_by(asin) %>%
+  summarise(mean(overall))
+
+colnames(avg_star) = c("ASIN", "Average Number of Stars")
+
+#sentiment
+avg_senti = all_info_top3 %>%
+  group_by(asin) %>%
+  summarise(mean(get_sentiment(reviewText)))
+
+colnames(avg_senti) = c("ASIN", "Average Sentiment Score")
+
+avg_star
+avg_senti
+```
+
+Part 3:
+
+```{r}
+#corpus
+corpus = VCorpus(VectorSource(all_info_top3$reviewText))
+
+#Step 1: cleaning
+corp = tm_map(corpus, removePunctuation) 
+corp = tm_map(corp, removeNumbers) 
+corp = tm_map(corp, content_transformer(tolower) ,lazy=TRUE) 
+corp = tm_map(corp, content_transformer(removeWords), c("TIL") ,lazy=TRUE)
+corp = tm_map(corp, content_transformer(removeWords), stopwords("english") ,lazy=TRUE)
+corp = tm_map(corp, stripWhitespace)
+
+#Step 2: document-term matrix
+dtm = DocumentTermMatrix(corp)
+dtms = removeSparseTerms(dtm, 0.983)
+dim(dtm)
+dim(dtms)
+dtms_m = as.matrix(dtms)
+dtms_m = cbind(dtms_m, all_info_top3$overall)
+
+#Step 3: Correlation of words to stars
+corr = cor(dtms_m[,c(296)], dtms_m[,-c(296)])
+top30_freq = tail(corr[1, order(corr)], 30)
+top30_names = tail(colnames(corr)[order(corr)],30)
+bottom30_freq = head(corr[1, order(corr)], 30)
+bottom30_names = head(colnames(corr)[order(corr)],30)
+
+#positive wordcloud
+layout(matrix(c(1, 2), nrow=2), heights=c(1, 4))
+par(mar=rep(0, 4))
+plot.new()
+text(x=0.5, y=0.5, "Wordcloud of Words Positively Correlated with Number of Stars")
+wordcloud(words = top30_names,freq=top30_freq, main="Title")
+
+#negative wordcloud
+layout(matrix(c(1, 2), nrow=2), heights=c(1, 4))
+par(mar=rep(0, 4))
+plot.new()
+text(x=0.5, y=0.5, "Wordcloud of Words Negatively Correlated with Number of Stars")
+wordcloud(words = bottom30_names,freq=bottom30_freq * -0.005)
+```
+
+Part 4
+
+The two features that I chose to use to predict whether or not a review was helpful was by looking at the number of numeric values that appear in the review and the number of expressive punctuations (exclamation points and question marks).
+
+On the training data, it predicts with an accuracy of 0.6735427 while assigning 0 to each row predicts with an accuracy of 0.6186867.
+
+On the testing data, it predicts with an accuracy of 0.6435192 while assigning 0 to each row predicts with an accuracy of 0.5676949.
+
+Therefore, the two features can be seen at somewhat accurate indicators of whether or not a reivew will be voted helpful.
+```{r}
+#Adding binary variable of whether the review has a helpful vote
+findHelpful = function(tuple) {
+  string = str_replace(tuple,'\\[', "")
+  num = (str_split(string, ","))[[1]][1]
+  return (num)
+}
+electronics$helpful_num = sapply(electronics$helpful, findHelpful)
+electronics$helpful_binary = ifelse(electronics$helpful_num > 0, 1, 0)
+
+#create feature - amount of numbers in review text
+findDigits = function(text) {
+  num = str_count(text, pattern="\\d+")
+  return (num)
+}
+
+electronics$totalNums = sapply(electronics$reviewText, findDigits)
+
+#create feature - amount of "!" or "?" in review text
+findPunc = function(text) {
+  num = str_count(text, pattern="!|\\?")
+  return (num)
+}
+
+electronics$totalPunc = sapply(electronics$reviewText, findPunc)
+
+#separating testing and training data
+train = electronics[1:(0.8 * nrow(electronics)),]
+test = electronics[-(1:(0.8 * nrow(electronics))),]
+```
+
+```{r}
+#creating model based off of training data
+trained_model = glm(data = train, helpful_binary ~ totalNums + totalPunc, family = binomial)
+
+#predict using model on training data
+train$prob = predict(trained_model, type="response")
+train$prediction = ifelse(train$prob > 0.44, 1, 0)
+mean(train$helpful_binary == train$prediction)
+
+#predicting 0 for every row on training data
+mean(train$helpful_binary == 0)
+```
+```{r}
+#predicting on testing data
+test$prob = predict(trained_model, newdata=test, type="response")
+test$prediction = ifelse(test$prob > 0.44, 1, 0)
+mean(test$helpful_binary == test$prediction)
+
+#predicting 0 for every row on training data
+mean(test$helpful_binary == 0)
+```
+
+
